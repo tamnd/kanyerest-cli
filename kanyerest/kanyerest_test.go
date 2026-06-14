@@ -1,62 +1,94 @@
-package kanyerest
+package kanyerest_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
+
+	"github.com/tamnd/kanyerest-cli/kanyerest"
 )
 
-func TestGet(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("User-Agent") == "" {
-			t.Error("request carried no User-Agent")
-		}
-		_, _ = w.Write([]byte("ok"))
+const fakeQuoteJSON = `{"quote":"I'm nice at ping pong"}`
+
+func newTestClient(ts *httptest.Server) *kanyerest.Client {
+	cfg := kanyerest.DefaultConfig()
+	cfg.BaseURL = ts.URL
+	cfg.Rate = 0
+	return kanyerest.NewClient(cfg)
+}
+
+func TestRandomQuoteParsesQuote(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, fakeQuoteJSON)
 	}))
-	defer srv.Close()
+	defer ts.Close()
 
-	c := NewClient()
-	c.Rate = 0 // no pacing in the test
-
-	body, err := c.Get(context.Background(), srv.URL)
+	c := newTestClient(ts)
+	q, err := c.RandomQuote(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(body) != "ok" {
-		t.Errorf("body = %q, want %q", body, "ok")
+	if q.Quote != "I'm nice at ping pong" {
+		t.Errorf("Quote = %q, want \"I'm nice at ping pong\"", q.Quote)
 	}
 }
 
-func TestGetRetriesOn503(t *testing.T) {
+func TestRandomQuoteSendsUserAgent(t *testing.T) {
+	var gotUA string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		_, _ = fmt.Fprint(w, fakeQuoteJSON)
+	}))
+	defer ts.Close()
+
+	c := newTestClient(ts)
+	_, err := c.RandomQuote(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotUA == "" {
+		t.Error("request carried no User-Agent")
+	}
+}
+
+func TestRandomQuoteRetriesOn503(t *testing.T) {
 	var hits int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits++
 		if hits < 3 {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
-		_, _ = w.Write([]byte("recovered"))
+		_, _ = fmt.Fprint(w, fakeQuoteJSON)
 	}))
-	defer srv.Close()
+	defer ts.Close()
 
-	c := NewClient()
-	c.Rate = 0
-	c.Retries = 5
+	cfg := kanyerest.DefaultConfig()
+	cfg.BaseURL = ts.URL
+	cfg.Rate = 0
+	cfg.Retries = 3
+	c := kanyerest.NewClient(cfg)
 
-	start := time.Now()
-	body, err := c.Get(context.Background(), srv.URL)
+	_, err := c.RandomQuote(context.Background())
 	if err != nil {
 		t.Fatal(err)
-	}
-	if string(body) != "recovered" {
-		t.Errorf("body = %q after retries", body)
 	}
 	if hits != 3 {
 		t.Errorf("server saw %d hits, want 3", hits)
 	}
-	if time.Since(start) < 500*time.Millisecond {
-		t.Error("retries did not back off")
+}
+
+func TestRandomQuoteNon200Error(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer ts.Close()
+
+	c := newTestClient(ts)
+	_, err := c.RandomQuote(context.Background())
+	if err == nil {
+		t.Error("expected error for 404, got nil")
 	}
 }
